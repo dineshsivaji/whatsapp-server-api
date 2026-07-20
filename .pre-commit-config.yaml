@@ -1,0 +1,30 @@
+repos:
+  # 1. Scan for AWS keys, tokens, and private keys using Gitleaks
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2 # Use the latest stable version
+    hooks:
+      - id: gitleaks
+
+  # 2. Prevent large files and generic low-hanging fruit
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  # 3. Custom Regex for PII (Emails and Phone Numbers)
+  - repo: local
+    hooks:
+      - id: block-pii-emails
+        name: Block Email Addresses
+        entry: '(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}'
+        language: pygrep
+        types: [text]
+        
+      - id: block-pii-phones
+        name: Block Phone Numbers (Generic 10-digit/International)
+        # Note: Adjust this regex to match the specific format of your region
+        entry: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+        language: pygrep
+        types: [text]
+        exclude: 'package-lock\.json|yarn\.lock' # Avoid scanning noise in lockfiles
