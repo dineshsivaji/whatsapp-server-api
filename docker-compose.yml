@@ -11,9 +11,9 @@ services:
     env_file: .env
     networks:
       - mini-net
-    #volumes:
+    volumes:
       # Maps your existing local auth folder into the container
-      #- ./auth:/app/auth_info_baileys
+      - ./auth:/app/auth_info_baileys
 
 networks:
   mini-net:
