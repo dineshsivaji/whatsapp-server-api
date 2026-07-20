@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } = require("@whiskeysockets/baileys");
 const P = require("pino");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
@@ -115,7 +115,6 @@ app.post("/send", async (req, res) => {
 });
 
 // ROUTE 2: New Attachment Endpoint (Processes Multi-part Streams)
-// Matches 'files={"file": ...}' payload out of your Python requests structure
 app.post("/media", upload.single("file"), async (req, res) => {
     if (!sock) {
         return res.status(500).json({ error: "WhatsApp not connected" });
@@ -124,7 +123,6 @@ app.post("/media", upload.single("file"), async (req, res) => {
         return res.status(400).json({ error: "No file payload detected in the request frame" });
     }
 
-    // Optional query check if you want to explicitly redirect individual attachments
     const target = getTargetJid(req.body.to);
 
     try {
@@ -153,7 +151,6 @@ app.listen(PORT, () => {
 // =========================
 // NATS INGRESS (separate from the HTTP routes)
 // =========================
-// Used only by the NATS pull-consumer. /send and /media are untouched.
 async function sendTextViaNats(to, text) {
     if (connectionState.status !== "open" || !sock) {
         throw new Error("WhatsApp not connected");
@@ -179,7 +176,7 @@ async function startBot() {
     // Fetch or define a valid version array to pass the noise gate
     let version = [2, 3000, 1017578434];
     try {
-        const latest = await fetchLatestBaileysVersion();
+        const latest = await fetchLatestWaWebVersion(); // Modern dynamic fetcher helper
         if (latest && latest.version) {
             version = latest.version;
             console.log(`🌐 Dynamically resolved latest WhatsApp Web Version: ${version.join('.')}`);
@@ -194,7 +191,6 @@ async function startBot() {
         logger: P({ level: "error" }), // Suppresses verbose packet telemetry logs
         mobile: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"],
-        // ADD THESE TWO CONFIGURATION LINES BELOW:
         defaultQueryTimeoutMs: 0,   // Prevent 408 Time-out issues during high data synchronization
         syncFullHistory: false,     // Skip heavy historical data downloads on startup
     });
@@ -218,10 +214,6 @@ async function startBot() {
             connectionState.lastError = null;
             connectionState.reconnectAttempts = 0;
 
-            // Start the NATS pull-consumer once per process lifetime.
-            // Baileys reconnects don't need a new subscriber — the existing
-            // one stays bound to the durable JetStream consumer and picks
-            // up where it left off.
             if (!natsStarted) {
                 natsStarted = true;
                 startNatsConsumer({
@@ -229,7 +221,6 @@ async function startBot() {
                     isReady: () => connectionState.status === "open" && !!sock,
                 }).catch((err) => {
                     console.error("❌ NATS consumer crashed:", err);
-                    // Don't kill the HTTP server — /send still works.
                 });
             }
         }
@@ -239,14 +230,17 @@ async function startBot() {
             connectionState.lastDisconnectedAt = new Date().toISOString();
             connectionState.lastError = lastDisconnect?.error?.message || null;
 
-            const shouldReconnect =
-                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             console.log("❌ Connection Closed. Reconnect Target Status:", shouldReconnect);
 
             if (shouldReconnect) {
                 connectionState.reconnectAttempts += 1;
                 setTimeout(startBot, 3000); // Safe delay step execution layout
+            } else {
+                console.error("🔒 Session logged out or permanently invalidated. Killing process to prevent rapid restart loops.");
+                process.exit(0); // Exits cleanly so systemd / PM2 doesn't log cycle infinitely
             }
         }
     });
