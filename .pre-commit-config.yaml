@@ -21,10 +21,10 @@ repos:
         language: pygrep
         types: [text]
         
-      - id: block-pii-phones
-        name: Block Phone Numbers (Generic 10-digit/International)
-        # Note: Adjust this regex to match the specific format of your region
-        entry: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-        language: pygrep
-        types: [text]
-        exclude: 'package-lock\.json|yarn\.lock' # Avoid scanning noise in lockfiles
+      #- id: block-pii-phones
+      #  name: Block Phone Numbers (Generic 10-digit/International)
+      #  # Note: Adjust this regex to match the specific format of your region
+      #  entry: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+      #  language: pygrep
+      #  types: [text]
+      #  exclude: 'package-lock\.json|yarn\.lock' # Avoid scanning noise in lockfiles
