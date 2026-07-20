@@ -161,6 +161,20 @@ async function sendTextViaNats(to, text) {
     console.log("To:", target);
 }
 
+async function sendMediaViaNats(to, buf, mimetype, filename) {
+    if (connectionState.status !== "open" || !sock) {
+        throw new Error("WhatsApp not connected");
+    }
+    const target = getTargetJid(to);
+    await sock.sendMessage(target, {
+        document: buf,
+        mimetype: mimetype,
+        fileName: filename,
+    });
+    console.log(`📤 [nats] Media sent: ${filename} (${buf.length} bytes)`);
+    console.log("To:", target);
+}
+
 // =========================
 // WHATSAPP BOT
 // =========================
@@ -217,7 +231,8 @@ async function startBot() {
             if (!natsStarted) {
                 natsStarted = true;
                 startNatsConsumer({
-                    sendMessage: sendTextViaNats,
+                    sendText: sendTextViaNats,
+                    sendMedia: sendMediaViaNats,
                     isReady: () => connectionState.status === "open" && !!sock,
                 }).catch((err) => {
                     console.error("❌ NATS consumer crashed:", err);

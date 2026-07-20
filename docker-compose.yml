@@ -4,11 +4,17 @@ services:
     build: .
     container_name: whatsapp-server-api
     restart: unless-stopped
-    #network_mode: host
+    environment:
+      - NATS_URL=nats://nats:4222   # reached by name on the shared mini-net
     ports:
-      - "127.0.0.1:3001:3001" # Accessible only from the host machine
+      - "127.0.0.1:3001:3001" # optional: manual HTTP access; nothing calls it once media moves to NATS
     env_file: .env
+    networks:
+      - mini-net
     #volumes:
       # Maps your existing local auth folder into the container
       #- ./auth:/app/auth_info_baileys
 
+networks:
+  mini-net:
+    external: true
