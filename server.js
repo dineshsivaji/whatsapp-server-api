@@ -49,6 +49,59 @@ function getTargetJid(to) {
 }
 
 // =========================
+// HUMAN-LIKE SEND HELPERS
+// =========================
+// Simulates the "typing…" indicator before a text send, with a duration
+// loosely based on message length so short and long messages don't take
+// the same amount of time to "type". Jitter avoids an identical delay
+// pattern on every send.
+function typingDelayMs(text) {
+    const words = text.trim().split(/\s+/).filter(Boolean).length || 1;
+    const wpm = 35 + Math.random() * 25;              // vary "typing speed" 35-60 wpm per message
+    const baseMs = (words / wpm) * 60_000;
+    const jitter = 300 + Math.random() * 700;
+    return Math.min(Math.max(baseMs + jitter, 800), 6000); // clamp to 0.8s - 6s
+}
+
+async function sendTextWithTyping(target, text) {
+    try {
+        await sock.presenceSubscribe(target);
+    } catch (_) {
+        // Some chat types (e.g. groups you're not subscribed to yet) can
+        // reject this — it's cosmetic, so ignore and carry on.
+    }
+    try {
+        await sock.sendPresenceUpdate("composing", target);
+    } catch (_) { /* non-fatal, proceed to send regardless */ }
+
+    await new Promise((r) => setTimeout(r, typingDelayMs(text)));
+
+    await sock.sendMessage(target, { text });
+}
+
+// Media has no real WhatsApp-UI equivalent of "typing" for documents, so
+// this just gives a short human-plausible pause (e.g. "picking a file")
+// before the upload lands, rather than an instant send.
+function mediaDelayMs() {
+    const jitter = 800 + Math.random() * 1200;
+    return jitter; // ~0.8s - 2s
+}
+
+async function sendMediaWithPause(target, buf, mimetype, filename) {
+    try {
+        await sock.sendPresenceUpdate("composing", target);
+    } catch (_) { /* non-fatal */ }
+
+    await new Promise((r) => setTimeout(r, mediaDelayMs()));
+
+    await sock.sendMessage(target, {
+        document: buf,
+        mimetype,
+        fileName: filename,
+    });
+}
+
+// =========================
 // EXPRESS SERVER (START ONCE)
 // =========================
 const app = express();
@@ -100,9 +153,7 @@ app.post("/send", async (req, res) => {
     }
 
     try {
-        await sock.sendMessage(target, {
-            text: message,
-        });
+        await sendTextWithTyping(target, message);
 
         console.log("📤 Sent:", message);
         console.log("To:", target);
@@ -129,11 +180,7 @@ app.post("/media", upload.single("file"), async (req, res) => {
         console.log(`📥 Received document attachment internally: ${req.file.originalname}`);
 
         // Broadcast file media buffer smoothly using native Baileys protocol options
-        await sock.sendMessage(target, {
-            document: req.file.buffer,         // Raw memory stream buffer
-            mimetype: req.file.mimetype,       // Passed down automatically (e.g. application/pdf)
-            fileName: req.file.originalname,   // Label displayed inside WhatsApp interface chats
-        });
+        await sendMediaWithPause(target, req.file.buffer, req.file.mimetype, req.file.originalname);
 
         console.log(`✅ Attachment [${req.file.originalname}] pushed successfully to ${target}`);
         res.json({ status: "media_sent", filename: req.file.originalname, to: target });
@@ -156,7 +203,7 @@ async function sendTextViaNats(to, text) {
         throw new Error("WhatsApp not connected");
     }
     const target = getTargetJid(to);
-    await sock.sendMessage(target, { text });
+    await sendTextWithTyping(target, text);
     console.log("📤 [nats] Sent:", text);
     console.log("To:", target);
 }
@@ -166,11 +213,7 @@ async function sendMediaViaNats(to, buf, mimetype, filename) {
         throw new Error("WhatsApp not connected");
     }
     const target = getTargetJid(to);
-    await sock.sendMessage(target, {
-        document: buf,
-        mimetype: mimetype,
-        fileName: filename,
-    });
+    await sendMediaWithPause(target, buf, mimetype, filename);
     console.log(`📤 [nats] Media sent: ${filename} (${buf.length} bytes)`);
     console.log("To:", target);
 }

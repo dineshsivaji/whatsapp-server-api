@@ -44,6 +44,22 @@ const NAK_DELAYS_MS = [
 
 const NOT_READY_NAK_MS = 30_000;
 
+// After each successfully delivered message, wait a randomized beat before
+// pulling the next one off the stream. Keeps a drained backlog (e.g. after
+// downtime) from firing off a burst of messages back-to-back, which reads
+// as automated and risks WhatsApp's spam heuristics. Only applied after a
+// successful send — failures/naks/terms already have their own delays.
+const INTER_MSG_DELAY_MIN_MS = 1_000;
+const INTER_MSG_DELAY_MAX_MS = 4_000;
+
+function interMessageDelayMs() {
+    return INTER_MSG_DELAY_MIN_MS + Math.random() * (INTER_MSG_DELAY_MAX_MS - INTER_MSG_DELAY_MIN_MS);
+}
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+
 // consume() pre-fetch budget. Small because we process sequentially and a
 // slow send shouldn't hold lots of messages in ack-pending state.
 const MAX_MESSAGES = 10;
@@ -140,6 +156,7 @@ async function handleText(msg, { sendText, isReady, log }) {
         await sendText(payload.to, payload.text);
         log.info(`[nats] text delivered msg_id=${msgId} delivered=${delivered}`);
         msg.ack();
+        await sleep(interMessageDelayMs());
     } catch (err) {
         const delay = nakDelay(delivered);
         log.warn(`[nats] sendText threw msg_id=${msgId} delivered=${delivered}: ${err.message || err} — nak ${delay}ms`);
@@ -173,6 +190,7 @@ async function handleMedia(msg, { sendMedia, isReady, log }) {
         await sendMedia(to, buf, mimetype, filename);
         log.info(`[nats] media delivered msg_id=${msgId} file=${filename} bytes=${buf.length} delivered=${delivered}`);
         msg.ack();
+        await sleep(interMessageDelayMs());
     } catch (err) {
         const delay = nakDelay(delivered);
         log.warn(`[nats] sendMedia threw msg_id=${msgId} file=${filename} delivered=${delivered}: ${err.message || err} — nak ${delay}ms`);
