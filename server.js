@@ -51,6 +51,23 @@ function getTargetJid(to) {
 // =========================
 // HUMAN-LIKE SEND HELPERS
 // =========================
+// Baileys is configured with defaultQueryTimeoutMs: 0 (no timeout) for the
+// main socket, so a presence query (sendPresenceUpdate) that never gets a
+// response from WhatsApp would otherwise hang forever — and since sends
+// happen one at a time off a queue, a single stuck presence call would
+// silently block every message behind it, with no error logged. This
+// wrapper guarantees the call resolves (or gives up) within
+// PRESENCE_TIMEOUT_MS no matter what Baileys/WhatsApp does.
+const PRESENCE_TIMEOUT_MS = 4000;
+
+function withTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(resolve, ms); // resolve (not reject) — a timed-out
+    });                                   // presence call is fine to ignore
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // Simulates the "typing…" indicator before a text send, with a duration
 // loosely based on message length so short and long messages don't take
 // the same amount of time to "type". Jitter avoids an identical delay
@@ -65,13 +82,7 @@ function typingDelayMs(text) {
 
 async function sendTextWithTyping(target, text) {
     try {
-        await sock.presenceSubscribe(target);
-    } catch (_) {
-        // Some chat types (e.g. groups you're not subscribed to yet) can
-        // reject this — it's cosmetic, so ignore and carry on.
-    }
-    try {
-        await sock.sendPresenceUpdate("composing", target);
+        await withTimeout(sock.sendPresenceUpdate("composing", target), PRESENCE_TIMEOUT_MS);
     } catch (_) { /* non-fatal, proceed to send regardless */ }
 
     await new Promise((r) => setTimeout(r, typingDelayMs(text)));
@@ -89,7 +100,7 @@ function mediaDelayMs() {
 
 async function sendMediaWithPause(target, buf, mimetype, filename) {
     try {
-        await sock.sendPresenceUpdate("composing", target);
+        await withTimeout(sock.sendPresenceUpdate("composing", target), PRESENCE_TIMEOUT_MS);
     } catch (_) { /* non-fatal */ }
 
     await new Promise((r) => setTimeout(r, mediaDelayMs()));
@@ -308,3 +319,4 @@ async function startBot() {
 
 // Start bot
 startBot();
+

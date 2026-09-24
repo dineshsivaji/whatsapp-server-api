@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-bridge",
+  "name": "whatsapp-server-api",
   "version": "1.0.0",
-  "description": "Baileys WhatsApp HTTP Bridge",
+  "description": "Baileys WhatsApp Server API",
   "main": "server.js",
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
