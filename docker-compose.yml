@@ -3,7 +3,7 @@ services:
   whatsapp-server-api:
     build: .
     container_name: whatsapp-server-api
-    restart: unless-stopped
+    restart: always
     environment:
       - NATS_URL=nats://nats:4222   # reached by name on the shared mini-net
     ports:
