@@ -24,6 +24,24 @@ const upload = multer(storage);
 // =========================
 let sock;
 
+
+
+let shuttingDown = false;
+
+async function shutdown(sig) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${sig} received, closing WhatsApp socket cleanly`);
+    try { sock?.end(undefined); } catch (_) {}   // closes the WebSocket; does NOT unlink the device
+    await new Promise((r) => setTimeout(r, 2000)); // let the close frame and any pending creds write flush
+    process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT",  () => shutdown("SIGINT"));
+
+
+
+
 // Tracks live WhatsApp connection state for the /health endpoint.
 let connectionState = {
     status: "connecting",        // "connecting" | "open" | "close"
@@ -295,11 +313,28 @@ async function startBot() {
         }
 
         if (connection === "close") {
+	    if (shuttingDown) return;
             isStarting = false;
             connectionState.lastDisconnectedAt = new Date().toISOString();
             connectionState.lastError = lastDisconnect?.error?.message || null;
 
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
+
+
+            const err = lastDisconnect?.error;
+            const statusCode = err?.output?.statusCode;
+            const reasonName = Object.entries(DisconnectReason)
+                .find(([, v]) => v === statusCode)?.[0] || "unknown";
+            connectionState.lastError = `${reasonName} (${statusCode}): ${err?.message || ""}`;
+
+            console.log("❌ Connection closed:", {
+                statusCode,
+                reasonName,
+                message: err?.message,
+                data: err?.data,                 // for stream conflicts, includes type e.g. device_removed / replaced
+                payload: err?.output?.payload,
+            });
+
+            // const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             console.log("❌ Connection Closed. Reconnect Target Status:", shouldReconnect);
