@@ -22,7 +22,7 @@
 // Crash safety: JetStream holds the message until ack(); a process
 // crash mid-delivery just means redelivery on next start.
 
-const { connect } = require("nats");
+import { connect } from "nats";
 
 const NATS_URL            = process.env.NATS_URL            || "nats://127.0.0.1:4222";
 const NATS_STREAM         = process.env.NATS_STREAM         || "NOTIFY";
@@ -198,4 +198,4 @@ async function handleMedia(msg, { sendMedia, isReady, log }) {
     }
 }
 
-module.exports = { startNatsConsumer };
+export { startNatsConsumer };

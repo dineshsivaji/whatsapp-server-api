@@ -1,15 +1,14 @@
-const {
-    default: makeWASocket,
+import makeWASocket, {
     useMultiFileAuthState,
     makeCacheableSignalKeyStore,
     DisconnectReason,
     fetchLatestWaWebVersion,
-} = require("@whiskeysockets/baileys");
-const P = require("pino");
-const qrcode = require("qrcode-terminal");
-const express = require("express");
-const multer = require("multer");
-const { startNatsConsumer } = require("./nats_consumer");
+} from "baileys";
+import P from "pino";
+import qrcode from "qrcode-terminal";
+import express from "express";
+import multer from "multer";
+import { startNatsConsumer } from "./nats_consumer.js";
 
 const PORT = process.env.PORT || 3001;
 const GROUP_ID = process.env.GROUP_ID;
@@ -46,7 +45,7 @@ let natsStarted = false;
 function getTargetJid(to) {
     if (to) {
         let cleanTo = to.toString().replace(/[\s\-+]/g, "");
-        if (!cleanTo.endsWith("@s.whatsapp.net") && !cleanTo.endsWith("@g.us")) {
+        if (!/@(s\.whatsapp\.net|g\.us|lid)$/.test(cleanTo)) {
             return `${cleanTo}@s.whatsapp.net`;
         }
         return cleanTo;
@@ -159,7 +158,7 @@ app.post("/send", async (req, res) => {
         let cleanTo = to.toString().replace(/[\s\-+]/g, "");
 
         // If it's a phone number without any suffix, append the individual chat domain
-        if (!cleanTo.endsWith("@s.whatsapp.net") && !cleanTo.endsWith("@g.us")) {
+        if (!/@(s\.whatsapp\.net|g\.us|lid)$/.test(cleanTo)) {
             target = `${cleanTo}@s.whatsapp.net`;
         } else {
             target = cleanTo;
