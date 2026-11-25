@@ -1,4 +1,10 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } = require("@whiskeysockets/baileys");
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    makeCacheableSignalKeyStore,
+    DisconnectReason,
+    fetchLatestWaWebVersion,
+} = require("@whiskeysockets/baileys");
 const P = require("pino");
 const qrcode = require("qrcode-terminal");
 const express = require("express");
@@ -23,24 +29,6 @@ const upload = multer(storage);
 // GLOBAL SOCKET
 // =========================
 let sock;
-
-
-
-let shuttingDown = false;
-
-async function shutdown(sig) {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`${sig} received, closing WhatsApp socket cleanly`);
-    try { sock?.end(undefined); } catch (_) {}   // closes the WebSocket; does NOT unlink the device
-    await new Promise((r) => setTimeout(r, 2000)); // let the close frame and any pending creds write flush
-    process.exit(0);
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT",  () => shutdown("SIGINT"));
-
-
-
 
 // Tracks live WhatsApp connection state for the /health endpoint.
 let connectionState = {
@@ -250,38 +238,102 @@ async function sendMediaViaNats(to, buf, mimetype, filename) {
 // =========================
 // WHATSAPP BOT
 // =========================
+const logger = P({ level: "error" }); // Suppresses verbose packet telemetry logs
+
 let isStarting = false;
+let shuttingDown = false;
+let reconnectTimer = null;
+let saveCredsFn = null;
+
+// Resolve the WA Web version once and reuse it. Re-fetching on every
+// reconnect adds a network round trip to each retry, and when the fetch
+// fails Baileys hands back a stale bundled version (seen in the logs as
+// 2.3000.1043857760 during the DNS outage).
+let cachedVersion = null;
+async function resolveVersion() {
+    if (cachedVersion) return cachedVersion;
+    try {
+        const latest = await fetchLatestWaWebVersion();
+        if (latest?.version && latest.isLatest !== false && !latest.error) {
+            cachedVersion = latest.version;
+            console.log(`🌐 Resolved WhatsApp Web Version: ${cachedVersion.join(".")}`);
+            return cachedVersion;
+        }
+    } catch (_) { /* fall through */ }
+    const fallback = [2, 3000, 1017578434];
+    console.log(`⚠️ Could not fetch remote version, using fallback ${fallback.join(".")} for this attempt`);
+    return fallback;
+}
+
+// Exponential backoff: 3s, 6s, 12s ... capped at 5 min, with jitter. A flat
+// 3s retry hammers WhatsApp during outages (DNS down, 503s) and rapid
+// reconnect bursts are a known trigger for WhatsApp unlinking the device.
+function backoffMs(attempt) {
+    const base = Math.min(3000 * 2 ** Math.max(attempt - 1, 0), 5 * 60_000);
+    return base + Math.floor(Math.random() * 1000);
+}
+
+function scheduleReconnect() {
+    if (shuttingDown || reconnectTimer) return;
+    connectionState.reconnectAttempts += 1;
+    const delay = backoffMs(connectionState.reconnectAttempts);
+    console.log(`🔁 Reconnecting in ${Math.round(delay / 1000)}s (attempt ${connectionState.reconnectAttempts})`);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        startBot().catch((err) => {
+            console.error("❌ startBot failed:", err);
+            isStarting = false;
+            scheduleReconnect();
+        });
+    }, delay);
+}
+
+// Tear down the previous socket fully before opening a new one. Without this
+// the old socket's listeners (incl. creds.update) stay attached, and two
+// sockets can end up writing the same auth/session files — that is what
+// corrupts Signal sessions ("Bad MAC") and eventually gets the device logged out.
+function disposeSocket(old) {
+    if (!old) return;
+    try { old.ev.removeAllListeners(); } catch (_) {}
+    try { old.end(undefined); } catch (_) {}
+}
 
 async function startBot() {
-    if (isStarting) return;
+    if (isStarting || shuttingDown) return;
     isStarting = true;
 
     // Persist session tokens securely in the configured auth folder space
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+    saveCredsFn = saveCreds;
 
-    // Fetch or define a valid version array to pass the noise gate
-    let version = [2, 3000, 1017578434];
-    try {
-        const latest = await fetchLatestWaWebVersion(); // Modern dynamic fetcher helper
-        if (latest && latest.version) {
-            version = latest.version;
-            console.log(`🌐 Dynamically resolved latest WhatsApp Web Version: ${version.join('.')}`);
-        }
-    } catch (err) {
-        console.log(`⚠️ Could not fetch remote version, falling back to static override: ${version.join('.')}`);
-    }
+    const version = await resolveVersion();
 
-    sock = makeWASocket({
-        version: version,
-        auth: state,
-        logger: P({ level: "error" }), // Suppresses verbose packet telemetry logs
+    disposeSocket(sock);
+    sock = undefined;
+
+    const thisSock = makeWASocket({
+        version,
+        auth: {
+            creds: state.creds,
+            // In-memory cache in front of the file key store: avoids racing
+            // reads/writes of pre-key & session files, a common Bad MAC cause.
+            keys: makeCacheableSignalKeyStore(state.keys, logger),
+        },
+        logger,
         mobile: false,
         browser: ["Ubuntu", "Chrome", "20.0.04"],
         defaultQueryTimeoutMs: 0,   // Prevent 408 Time-out issues during high data synchronization
         syncFullHistory: false,     // Skip heavy historical data downloads on startup
+        markOnlineOnConnect: false, // Don't steal "online" from the phone (keeps phone notifications working)
     });
+    sock = thisSock;
 
-    sock.ev.on("connection.update", (update) => {
+    thisSock.ev.on("creds.update", saveCreds);
+
+    thisSock.ev.on("connection.update", (update) => {
+        // Ignore late events from a socket we've already replaced.
+        if (thisSock !== sock) return;
+
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -308,50 +360,80 @@ async function startBot() {
                     isReady: () => connectionState.status === "open" && !!sock,
                 }).catch((err) => {
                     console.error("❌ NATS consumer crashed:", err);
+                    // Allow a later reconnect to retry binding NATS (e.g. NATS
+                    // container wasn't up yet after a power cut).
+                    natsStarted = false;
                 });
             }
         }
 
         if (connection === "close") {
-	    if (shuttingDown) return;
             isStarting = false;
             connectionState.lastDisconnectedAt = new Date().toISOString();
             connectionState.lastError = lastDisconnect?.error?.message || null;
-
-
 
             const err = lastDisconnect?.error;
             const statusCode = err?.output?.statusCode;
             const reasonName = Object.entries(DisconnectReason)
                 .find(([, v]) => v === statusCode)?.[0] || "unknown";
             connectionState.lastError = `${reasonName} (${statusCode}): ${err?.message || ""}`;
-
             console.log("❌ Connection closed:", {
                 statusCode,
                 reasonName,
                 message: err?.message,
                 data: err?.data,                 // for stream conflicts, includes type e.g. device_removed / replaced
-                payload: err?.output?.payload,
             });
 
-            // const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            if (shuttingDown) return;
 
-            console.log("❌ Connection Closed. Reconnect Target Status:", shouldReconnect);
-
-            if (shouldReconnect) {
-                connectionState.reconnectAttempts += 1;
-                setTimeout(startBot, 3000); // Safe delay step execution layout
-            } else {
-                console.error("🔒 Session logged out or permanently invalidated. Killing process to prevent rapid restart loops.");
-                process.exit(0); // Exits cleanly so systemd / PM2 doesn't log cycle infinitely
+            if (statusCode === DisconnectReason.loggedOut) {
+                console.error("🔒 Logged out by WhatsApp (401). Delete the auth folder and re-scan the QR. Exiting.");
+                process.exit(0);
             }
+
+            if (statusCode === DisconnectReason.connectionReplaced) {
+                // 440: another client logged in with the SAME auth folder.
+                // Reconnecting here makes the two instances kick each other
+                // forever and gets the device unlinked. Stop instead.
+                console.error("⚠️ Connection replaced (440): another instance is using this session. Stop the other one; not reconnecting.");
+                return;
+            }
+
+            if (statusCode === DisconnectReason.badSession) {
+                console.error("⚠️ Bad session (500) reported by WhatsApp — if this repeats, re-link the device.");
+            }
+
+            scheduleReconnect();
         }
     });
-
-    sock.ev.on("creds.update", saveCreds);
 }
 
-// Start bot
-startBot();
+// =========================
+// GRACEFUL SHUTDOWN
+// =========================
+// Flush credentials and close the socket (never logout()) so a power-cut
+// shutdown doesn't leave half-written auth files behind.
+async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${signal} received, closing WhatsApp socket cleanly`);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    const force = setTimeout(() => process.exit(0), 8000);
+    try {
+        if (saveCredsFn) await saveCredsFn();
+    } catch (err) {
+        console.error("Failed to flush creds on shutdown:", err);
+    }
+    try { sock?.end(undefined); } catch (_) {}
+    clearTimeout(force);
+    process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
+// Start bot
+startBot().catch((err) => {
+    console.error("❌ Initial startBot failed:", err);
+    isStarting = false;
+    scheduleReconnect();
+});
